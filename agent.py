@@ -51,8 +51,18 @@ def call_model_with_retry(messages, cfg, max_retries=5):
             display.wait_rate_limit(e.retry_after)
 
 
-def run_tool_call(tool_call, cfg=None):
+def run_tool_call(tool_call, cfg=None, confirm_fn=None, log_fn=None):
+    """
+    confirm_fn(description: str) -> bool — как спросить y/n. По умолчанию
+    display.confirm_action (терминал). Telegram-бот передаёт свою версию
+    через inline-кнопки.
+    log_fn(name, args_repr) — как показать вызов инструмента. По умолчанию
+    display.tool_call. Telegram-бот передаёт свою версию (отправка в чат).
+    """
     verbose = (cfg or {}).get("_verbose", True)
+    confirm_fn = confirm_fn or display.confirm_action
+    log_fn = log_fn or display.tool_call
+
     name = tool_call["function"]["name"]
     try:
         args = json.loads(tool_call["function"]["arguments"])
@@ -68,20 +78,20 @@ def run_tool_call(tool_call, cfg=None):
         target = args.get("path", "?")
         extra = args.get("args", "")
         display_cmd = f"python3 {target} {extra}".strip()
-        if not display.confirm_action(f"Запустить скрипт: {display_cmd}"):
+        if not confirm_fn(f"Запустить скрипт: {display_cmd}"):
             return "ERROR: пользователь отклонил запуск скрипта"
 
     # delete_file — тоже требует подтверждения (необратимое действие)
     if name == "delete_file":
         target = args.get("path", "?")
-        if not display.confirm_action(f"Удалить файл: {target}"):
+        if not confirm_fn(f"Удалить файл: {target}"):
             return "ERROR: пользователь отклонил удаление файла"
 
     # install_package — тоже требует подтверждения (меняет систему)
     if name == "install_package":
         manager = args.get("manager", "?")
         package = args.get("package", "?")
-        if not display.confirm_action(f"Установить пакет: {manager} install {package}"):
+        if not confirm_fn(f"Установить пакет: {manager} install {package}"):
             return "ERROR: пользователь отклонил установку пакета"
 
     # Подтверждение для потенциально опасных bash-команд
@@ -89,7 +99,7 @@ def run_tool_call(tool_call, cfg=None):
         cmd = args.get("command", "")
         dangerous = any(x in cmd for x in ["rm -rf", "mkfs", "dd if=", ":(){:|:&};:"])
         if dangerous:
-            if not display.confirm_dangerous(cmd):
+            if not confirm_fn(f"[ОПАСНО] Выполнить команду: {cmd}"):
                 return "ERROR: пользователь отклонил выполнение команды"
 
     args_repr = ', '.join(
@@ -97,10 +107,12 @@ def run_tool_call(tool_call, cfg=None):
         for k, v in args.items()
     )
     if verbose:
-        display.tool_call(name, args_repr)
+        log_fn(name, args_repr)
     try:
         result = fn(**args)
-        if verbose:
+        if verbose and log_fn is display.tool_call:
+            # превью результата — только для терминального вывода по умолчанию;
+            # Telegram-бот решает сам, показывать ли превью, в своей log_fn
             display.tool_result_preview(result)
         return result
     except TypeError as e:

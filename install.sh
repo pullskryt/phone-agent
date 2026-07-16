@@ -111,11 +111,51 @@ else
     echo -e "${C_GRAY}Пропущено — поставить позже: bash $SCRIPT_DIR/local_setup.sh${C_RESET}"
 fi
 
+# ---- Telegram-бот ----
+echo ""
+box "Telegram-бот (управлять агентом из чата)"
+read -p "Настроить сейчас? (y/N): " WANT_TELEGRAM
+TG_TOKEN=""
+TG_IDS=""
+if [ "$WANT_TELEGRAM" = "y" ] || [ "$WANT_TELEGRAM" = "Y" ]; then
+    echo -e "${C_GRAY}1. Открой Telegram, напиши @BotFather, команда /newbot${C_RESET}"
+    echo -e "${C_GRAY}2. Скопируй выданный токен сюда${C_RESET}"
+    read -p "Токен бота: " TG_TOKEN
+    echo ""
+    echo -e "${C_GRAY}Узнать свой Telegram user_id можно у @userinfobot${C_RESET}"
+    echo -e "${C_GRAY}Можно указать несколько ID через запятую (например: 111111,222222)${C_RESET}"
+    read -p "Твой Telegram user_id: " TG_IDS
+
+    if [ -n "$TG_TOKEN" ]; then
+        python3 - "$SCRIPT_DIR/config.json" "$TG_TOKEN" "$TG_IDS" << 'PYEOF'
+import json, sys
+config_path, token, ids_raw = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(config_path) as f:
+    cfg = json.load(f)
+cfg.setdefault("telegram", {})
+cfg["telegram"]["bot_token"] = token
+ids = []
+for part in ids_raw.replace(" ", "").split(","):
+    if part.isdigit():
+        ids.append(int(part))
+cfg["telegram"]["allowed_user_ids"] = ids
+with open(config_path, "w") as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=2)
+print(f"Telegram настроен, разрешённые ID: {ids}")
+PYEOF
+    fi
+else
+    echo -e "${C_GRAY}Пропущено — настроить позже в config.json -> telegram, или запусти install.sh снова${C_RESET}"
+fi
+
 # ---- Готово ----
 echo ""
 box "Готово!"
 echo -e "1. Выполни: ${C_ACCENT}source ~/.bashrc${C_RESET}   (или перезапусти Termux)"
 echo -e "2. Дальше просто пиши из любой папки:  ${C_ACCENT}ai${C_RESET}   или   ${C_ACCENT}ии${C_RESET}"
+if [ -n "$TG_TOKEN" ]; then
+    echo -e "3. Запусти Telegram-бота: ${C_ACCENT}aibot${C_RESET}"
+fi
 echo ""
 if [ -z "$API_KEY" ] && [ "$SERVICE_CHOICE" != "2" ]; then
     echo -e "${C_GRAY}Не забудь вписать API-ключ в config.json перед первым запуском.${C_RESET}"

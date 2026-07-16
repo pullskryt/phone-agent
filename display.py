@@ -133,14 +133,17 @@ class MascotIdle:
 
     def _redraw(self, frame_idx):
         lines = _render_mascot_frame(frame_idx, self.width)
-        # восстанавливаем сохранённую позицию (сразу под маскотом), поднимаемся
-        # на высоту маскота, перерисовываем, затем возвращаем курсор обратно —
-        # чтобы не мешать вводу пользователя, который печатает ниже.
-        sys.stdout.write("\033[u")  # restore to saved position (под маскотом)
+        # Сохраняем ТЕКУЩУЮ позицию курсора (там, где сейчас реально стоит
+        # input() и мигает "❯") — это критично: раньше здесь ошибочно
+        # полагались на позицию, сохранённую в header() СРАЗУ под маскотом,
+        # из-за чего курсор после перерисовки прыгал обратно под маскота, а
+        # не туда, где пользователь печатает — рамка "въезжала" в текст.
+        sys.stdout.write("\0337")  # DEC save cursor (курсор ввода)
+        sys.stdout.write("\033[u")  # restore к позиции под маскотом (из header())
         sys.stdout.write(f"\033[{self.MASCOT_ROW_OFFSET}A")  # подняться к первой строке маскота
         for line in lines:
             sys.stdout.write("\r\033[K" + line + "\n")
-        sys.stdout.write("\033[u")  # вернуть курсор туда, где юзер печатает
+        sys.stdout.write("\0338")  # DEC restore cursor — назад туда, где печатает пользователь
         sys.stdout.flush()
 
     def start(self):

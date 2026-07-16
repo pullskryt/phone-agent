@@ -29,10 +29,11 @@ ai() {
     AI_AGENT_CWD="\$(pwd)" python "$AGENT_DIR/agent.py" "\$@"
 }
 alias ии='ai'
+alias aibot='python "$AGENT_DIR/telegram_bot.py"'
 $MARKER_END
 EOF
 
-echo "Готово! Команды 'ai' и 'ии' добавлены в $SHELL_RC"
+echo "Готово! Команды 'ai', 'ии' и 'aibot' добавлены в $SHELL_RC"
 echo ""
 echo "Чтобы применить прямо сейчас, выполни:"
 echo "  source $SHELL_RC"
@@ -41,3 +42,4 @@ echo "После этого из любой папки в Termux можно пи
 echo "  ai"
 echo "  ии"
 echo "  ai --provider local"
+echo "  aibot          # запустить Telegram-бота (если настроен)"
