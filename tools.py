@@ -238,6 +238,78 @@ def web_fetch(url: str, save_to: str = None) -> str:
         return f"ERROR: {e}"
 
 
+def install_package(manager: str, package: str) -> str:
+    """
+    Установить зависимость через pip или pkg (Termux). Всегда требует
+    подтверждения пользователя на уровне agent.py, как run_python/delete_file —
+    установка пакетов меняет систему и не должна происходить незаметно.
+    """
+    manager = manager.lower().strip()
+    if manager not in ("pip", "pkg"):
+        return f"ERROR: неизвестный менеджер пакетов '{manager}', используй 'pip' или 'pkg'"
+
+    if manager == "pip":
+        cmd = ["pip", "install", "--break-system-packages", package]
+    else:
+        cmd = ["pkg", "install", "-y", package]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        out = result.stdout[-4000:] if result.stdout else ""
+        err = result.stderr[-2000:] if result.stderr else ""
+        combined = out
+        if err:
+            combined += f"\n[stderr]\n{err}"
+        combined += f"\n[exit code: {result.returncode}]"
+        return combined.strip()
+    except subprocess.TimeoutExpired:
+        return "ERROR: установка превысила таймаут (180с) — пакет слишком большой или сеть медленная"
+    except FileNotFoundError:
+        return f"ERROR: команда '{manager}' не найдена в системе"
+    except Exception as e:
+        return f"ERROR: {e}"
+
+
+def list_dialogues() -> str:
+    """
+    Список сохранённых прошлых диалогов в ~/Dialogues — самые свежие первыми.
+    Используй это, чтобы понять, какие диалоги вообще есть, прежде чем
+    читать конкретный через read_dialogue.
+    """
+    dialogues_dir = os.path.expanduser("~/Dialogues")
+    if not os.path.isdir(dialogues_dir):
+        return "(папка ~/Dialogues пока не существует — сохранённых диалогов ещё нет)"
+
+    files = sorted(
+        [f for f in os.listdir(dialogues_dir) if f.startswith("dialogue_")],
+        reverse=True,
+    )
+    if not files:
+        return "(сохранённых диалогов пока нет)"
+    return "\n".join(files)
+
+
+def read_dialogue(filename: str) -> str:
+    """
+    Прочитать содержимое конкретного сохранённого диалога из ~/Dialogues
+    (имя файла бери из list_dialogues). Используй это разово, когда прошлый
+    контекст реально нужен для текущей задачи — если оказалось, что не
+    пригодился, просто не опирайся на него дальше в ответе.
+    """
+    dialogues_dir = os.path.expanduser("~/Dialogues")
+    full = os.path.join(dialogues_dir, os.path.basename(filename))
+    if not os.path.isfile(full):
+        return f"ERROR: диалог не найден: {filename}"
+    try:
+        with open(full, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+        if len(content) > 12000:
+            content = content[:12000] + "\n...[обрезано]"
+        return content
+    except Exception as e:
+        return f"ERROR: {e}"
+
+
 # ---- JSON-схемы для function calling (OpenAI-совместимый формат) ----
 
 TOOL_SCHEMAS = [
@@ -385,6 +457,41 @@ TOOL_SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "install_package",
+            "description": "Установить недостающую зависимость через pip (python-библиотеки) или pkg (Termux-пакеты). Пользователь всегда подтверждает установку.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "manager": {"type": "string", "description": "'pip' или 'pkg'"},
+                    "package": {"type": "string", "description": "имя пакета, например 'requests' или 'imagemagick'"},
+                },
+                "required": ["manager", "package"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_dialogues",
+            "description": "Показать список сохранённых прошлых диалогов (сессий) с пользователем — самые свежие первыми. Используй перед read_dialogue, чтобы выбрать нужный.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_dialogue",
+            "description": "Прочитать содержимое конкретного прошлого диалога (имя файла из list_dialogues), если контекст прошлой сессии реально нужен для текущей задачи.",
+            "parameters": {
+                "type": "object",
+                "properties": {"filename": {"type": "string"}},
+                "required": ["filename"],
+            },
+        },
+    },
 ]
 
 TOOL_FUNCTIONS = {
@@ -398,4 +505,7 @@ TOOL_FUNCTIONS = {
     "grep_search": grep_search,
     "delete_file": delete_file,
     "web_fetch": web_fetch,
+    "install_package": install_package,
+    "list_dialogues": list_dialogues,
+    "read_dialogue": read_dialogue,
 }
