@@ -87,6 +87,16 @@ class TelegramAPI:
             "chat_id": chat_id, "message_id": message_id, "text": text,
         })
 
+    def answer_inline_query(self, inline_query_id, results, cache_time=0):
+        # cache_time=0: не даём Telegram кэшировать результат на своей стороне —
+        # ответы у нас генеративные и разные каждый раз даже на похожий запрос.
+        return self._call("answerInlineQuery", {
+            "inline_query_id": inline_query_id,
+            "results": results,
+            "cache_time": cache_time,
+            "is_personal": True,
+        })
+
 
 def make_confirm_button_markup(confirm_id):
     return {
@@ -159,28 +169,34 @@ def process_user_message(api, chat_id, text, cfg, sessions):
         sessions[chat_id] = [{"role": "system", "content": cfg["system_prompt"]}]
     messages = sessions[chat_id]
 
-    if text.strip().lower() == "/clear":
-        agent_core.save_dialogue(messages, cfg)
-        sessions[chat_id] = [{"role": "system", "content": cfg["system_prompt"]}]
-        api.send_message(chat_id, "История диалога очищена.")
-        return
+    confirm_fn = lambda desc: request_confirmation(api, chat_id, desc)
+    log_fn = lambda name, args_repr: api.send_message(chat_id, f"Вызываю: {name}({args_repr})")
 
-    if text.strip().lower() in ("/help", "/start"):
-        names = ", ".join(tools.TOOL_FUNCTIONS.keys())
-        api.send_message(
-            chat_id,
-            f"Termux AI Agent через Telegram.\n\n"
-            f"Доступные инструменты: {names}\n\n"
-            f"Команды: /clear — сбросить историю диалога.\n"
-            f"Действия вроде запуска скриптов или удаления файлов запрашивают "
-            f"подтверждение прямо здесь, кнопками.",
-        )
+    stripped = text.strip()
+
+    if stripped.lower() == "/start":
+        stripped = "/help"  # /start в Telegram — стандартный алиас на приветствие/справку
+
+    if stripped.startswith("/"):
+        if stripped.lower() == "/clear":
+            agent_core.save_dialogue(messages, cfg)
+
+        messages, response_text, meta = agent_core.execute_slash_command(stripped, cfg, messages)
+        sessions[chat_id] = messages
+
+        if meta.get("needs_confirmation"):
+            if confirm_fn(meta["needs_confirmation"]):
+                _, path, run_args = meta["confirmed_action"]
+                api.send_message(chat_id, f"Вызываю: run_python(path={path!r})")
+                result = tools.run_python(path, run_args)
+                api.send_message(chat_id, str(result)[:3900])
+            return
+
+        if response_text:
+            api.send_message(chat_id, response_text)
         return
 
     messages.append({"role": "user", "content": text})
-
-    confirm_fn = lambda desc: request_confirmation(api, chat_id, desc)
-    log_fn = lambda name, args_repr: api.send_message(chat_id, f"Вызываю: {name}({args_repr})")
 
     consecutive_tool_errors = 0
     for _ in range(cfg.get("max_tool_iterations", 15)):
@@ -236,8 +252,106 @@ def process_user_message(api, chat_id, text, cfg, sessions):
         api.send_message(chat_id, "Достигнут лимит итераций инструментов.")
 
 
+def handle_inline_query(api, inline_query, cfg, allowed_ids, pending_inline):
+    """
+    Настоящий Telegram inline mode: пишешь "@botname вопрос" в любом чате,
+    выбираешь результат — он отправится как твоё собственное сообщение.
+    Telegram ждёт ответ считанные секунды, поэтому здесь ЖЁСТКО запрещены
+    вызовы инструментов (tool_choice="none") и укорочен таймаут.
+
+    Если вопрос всё же требует инструментов, показываем второй вариант
+    результата — при выборе которого ничего не отправляется в чат сразу,
+    а бот пишет тебе в личку просьбу подтвердить использование инструментов;
+    после подтверждения полноценный ответ с тулами приходит туда же личным
+    сообщением с пометкой, к какому вопросу он относится.
+    """
+    query_id = inline_query["id"]
+    user_id = inline_query["from"]["id"]
+    query_text = inline_query.get("query", "").strip()
+
+    if allowed_ids and user_id not in allowed_ids:
+        api.answer_inline_query(query_id, [])
+        return
+
+    if not query_text:
+        api.answer_inline_query(query_id, [])
+        return
+
+    # Быстрый ответ без инструментов — основной результат inline
+    quick_text = None
+    try:
+        messages = [
+            {"role": "system", "content": cfg["system_prompt"]},
+            {"role": "user", "content": query_text},
+        ]
+        response = agent_core.call_model(messages, cfg, tool_choice="none", timeout=8)
+        if "choices" in response:
+            quick_text = response["choices"][0]["message"].get("content") or None
+    except Exception:
+        quick_text = None  # не срываем inline на ошибке — просто не покажем быстрый вариант
+
+    results = []
+    if quick_text:
+        message_with_question = f"Вопрос: {query_text}\n\n{quick_text}"
+        if len(message_with_question) > 4096:
+            # режем сам ответ, а не вопрос — вопрос короче и важнее для контекста
+            budget = 4096 - len(f"Вопрос: {query_text}\n\n") - 1
+            message_with_question = f"Вопрос: {query_text}\n\n{quick_text[:budget]}…"
+        results.append({
+            "type": "article",
+            "id": f"quick_{query_id}",
+            "title": quick_text[:60] + ("…" if len(quick_text) > 60 else ""),
+            "description": "Отправить как есть (без инструментов)",
+            "input_message_content": {"message_text": message_with_question},
+        })
+
+    # Второй вариант — просим инструменты, ответ придёт личным сообщением после подтверждения
+    pending_key = f"inline_{query_id}"
+    pending_inline[pending_key] = {"user_id": user_id, "query": query_text}
+    results.append({
+        "type": "article",
+        "id": pending_key,
+        "title": "Обработать с инструментами (ответ придёт в личку)",
+        "description": query_text[:80],
+        "input_message_content": {
+            "message_text": f"Запрос на обработку с инструментами: {query_text}",
+        },
+    })
+
+    api.answer_inline_query(query_id, results, cache_time=0)
+
+
+def handle_chosen_inline_result(api, chosen, cfg, sessions):
+    """
+    Срабатывает, когда пользователь реально ВЫБРАЛ вариант "с инструментами"
+    из inline-списка (Telegram шлёт chosen_inline_result). Отправляем ему в
+    личку запрос на подтверждение использования инструментов.
+    """
+    result_id = chosen.get("result_id", "")
+    if not result_id.startswith("inline_"):
+        return  # это был быстрый вариант — уже отправлен как есть, ничего доделывать не надо
+
+    user_id = chosen["from"]["id"]
+    query_text = chosen.get("query", "")
+
+    api.send_message(
+        user_id,
+        f"Ответ на вопрос: {query_text}\n\n"
+        f"Этот запрос может потребовать инструменты (чтение файлов, запуск кода и т.п.). "
+        f"Обрабатываю и, если понадобится что-то подтвердить, — спрошу здесь.",
+    )
+
+    threading.Thread(
+        target=process_user_message,
+        args=(api, user_id, query_text, cfg, sessions),
+        daemon=True,
+    ).start()
+
+
 def main():
     cfg = load_config()
+    cfg.setdefault("_verbose", True)
+    cfg.setdefault("_economy_mode", False)
     tg_cfg = cfg.get("telegram", {})
     token = tg_cfg.get("bot_token", "")
     allowed_ids = set(tg_cfg.get("allowed_user_ids", []))
@@ -254,6 +368,7 @@ def main():
 
     api = TelegramAPI(token)
     sessions = {}
+    pending_inline = {}
     offset = None
 
     print(f"Telegram-бот запущен. Разрешённые ID: {allowed_ids or '(никто)'}")
@@ -275,6 +390,20 @@ def main():
 
         for update in updates.get("result", []):
             offset = update["update_id"] + 1
+
+            if "inline_query" in update:
+                # Отвечаем в отдельном потоке — Telegram ждёт ответ считанные
+                # секунды, а блокировать получение остальных апдейтов нельзя.
+                threading.Thread(
+                    target=handle_inline_query,
+                    args=(api, update["inline_query"], cfg, allowed_ids, pending_inline),
+                    daemon=True,
+                ).start()
+                continue
+
+            if "chosen_inline_result" in update:
+                handle_chosen_inline_result(api, update["chosen_inline_result"], cfg, sessions)
+                continue
 
             if "callback_query" in update:
                 cq = update["callback_query"]

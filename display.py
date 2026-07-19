@@ -293,6 +293,7 @@ def show_help(tool_schemas, cfg):
     print(f"  {C.ACCENT}/system [текст]{C.RESET}    — показать/изменить системный промпт")
     print(f"  {C.ACCENT}/provider{C.RESET}          — показать текущего провайдера")
     print(f"  {C.ACCENT}/logs{C.RESET}              — вкл/выкл подробный вывод вызовов инструментов")
+    print(f"  {C.ACCENT}/economy{C.RESET}           — вкл/выкл экономию запросов к провайдеру")
     print(f"  {C.ACCENT}/clear{C.RESET}             — очистить историю диалога")
     print(f"  {C.ACCENT}exit{C.RESET}               — выйти")
     print(f"\n  {C.DIM}Провайдер: {cfg['active_provider']}, модель: "

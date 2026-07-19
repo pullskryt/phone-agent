@@ -29,12 +29,33 @@ def load_config():
         return json.load(f)
 
 
-def call_model(messages, cfg):
+ECONOMY_MODE_HINT = (
+    " [РЕЖИМ ЭКОНОМИИ ЗАПРОСОВ ВКЛЮЧЁН: каждый вызов инструмента расходует лимит запросов "
+    "у провайдера — используй инструменты только когда без них реально не обойтись. "
+    "Если можешь ответить из общих знаний или того, что уже есть в истории диалога — "
+    "отвечай сразу, без вызова инструментов. Объединяй несколько похожих операций в один "
+    "вызов там, где это возможно, вместо серии мелких вызовов.]"
+)
+
+
+def call_model(messages, cfg, tool_choice="auto", timeout=None):
     provider = cfg["active_provider"]
+
+    # Режим экономии запросов (/economy) — временно дополняем системный промпт
+    # инструкцией быть скупее на вызовы инструментов, не трогая постоянный
+    # cfg["system_prompt"] и не изменяя историю messages, которую хранит вызывающий код.
+    if cfg.get("_economy_mode") and messages and messages[0].get("role") == "system":
+        messages = [dict(messages[0]), *messages[1:]]
+        messages[0]["content"] = messages[0]["content"] + ECONOMY_MODE_HINT
+
+    kwargs = {"tool_choice": tool_choice}
+    if timeout is not None:
+        kwargs["timeout"] = timeout
+
     if provider == "api":
-        return api_provider.chat(messages, tools.TOOL_SCHEMAS, cfg["api"])
+        return api_provider.chat(messages, tools.TOOL_SCHEMAS, cfg["api"], **kwargs)
     elif provider == "local":
-        return local_provider.chat(messages, tools.TOOL_SCHEMAS, cfg["local"])
+        return local_provider.chat(messages, tools.TOOL_SCHEMAS, cfg["local"], **kwargs)
     else:
         raise RuntimeError(f"Неизвестный провайдер: {provider}")
 
@@ -176,63 +197,114 @@ def save_dialogue(messages, cfg):
         pass
 
 
-def handle_slash_command(command: str, cfg: dict, messages: list):
+def execute_slash_command(command: str, cfg: dict, messages: list):
     """
-    Возвращает (messages, should_clear_screen).
-    Может мутировать cfg на месте (для /model).
+    Общая логика слэш-команд, независимая от способа вывода (терминал или
+    Telegram). Возвращает (messages, response_text, meta) — meta это словарь
+    с доп. флагами вроде {'show_help': True, 'cleared': True}, которые
+    вызывающий код может использовать для своего UI (например, показать
+    полный список инструментов в терминале красивой рамкой, а в Telegram —
+    обычным текстом).
     """
     parts = command.strip().split(maxsplit=1)
     cmd = parts[0].lower()
     arg = parts[1] if len(parts) > 1 else ""
+    meta = {}
 
     if cmd in ("/help", "/?"):
-        display.show_help(tools.TOOL_SCHEMAS, cfg)
+        meta["show_help"] = True
+        names = ", ".join(tools.TOOL_FUNCTIONS.keys())
+        text = (
+            f"Инструменты: {names}\n\n"
+            f"Команды: /help /provider /model <имя> /system [текст] /run <файл> [аргументы] "
+            f"/logs /economy /clear"
+        )
 
     elif cmd == "/provider":
-        display.info(f"Текущий провайдер: {cfg['active_provider']}")
+        text = f"Текущий провайдер: {cfg['active_provider']}"
 
     elif cmd == "/model":
         if not arg:
             current = cfg.get(cfg["active_provider"], {}).get("model", "?")
-            display.info(f"Текущая модель: {current}. Использование: /model <название>")
+            text = f"Текущая модель: {current}. Использование: /model <название>"
         else:
             cfg[cfg["active_provider"]]["model"] = arg
-            display.info(f"Модель переключена на: {arg}")
+            text = f"Модель переключена на: {arg}"
 
     elif cmd == "/system":
         if not arg:
-            display.show_system_prompt(cfg["system_prompt"])
+            text = f"Системный промпт:\n{cfg['system_prompt']}"
         else:
             cfg["system_prompt"] = arg
             if messages:
                 messages[0] = {"role": "system", "content": arg}
-            display.info("Системный промпт обновлён (действует с текущего момента).")
+            text = "Системный промпт обновлён (действует с текущего момента)."
 
     elif cmd == "/run":
         if not arg:
-            display.tool_warning("Использование: /run <путь-к-файлу.py> [аргументы]")
+            text = "Использование: /run <путь-к-файлу.py> [аргументы]"
         else:
             run_parts = arg.split(maxsplit=1)
             path = run_parts[0]
             run_args = run_parts[1] if len(run_parts) > 1 else ""
-            if display.confirm_action(f"Запустить: python3 {path} {run_args}".strip()):
-                display.tool_call("run_python", f"path={path!r}")
-                result = tools.run_python(path, run_args)
-                display.tool_result_preview(result)
+            meta["needs_confirmation"] = f"Запустить: python3 {path} {run_args}".strip()
+            meta["confirmed_action"] = ("run_python", path, run_args)
+            text = None  # вызывающий код сам решает, как спросить подтверждение
 
     elif cmd == "/logs":
         cfg["_verbose"] = not cfg.get("_verbose", True)
         state = "включены" if cfg["_verbose"] else "выключены"
-        display.info(f"Подробные логи вызовов инструментов {state}.")
+        text = f"Подробные логи вызовов инструментов {state}."
+
+    elif cmd == "/economy":
+        cfg["_economy_mode"] = not cfg.get("_economy_mode", False)
+        state = "включён" if cfg["_economy_mode"] else "выключен"
+        text = (
+            f"Режим экономии запросов {state}."
+            + (
+                " Модель будет реже прибегать к инструментам и стараться отвечать "
+                "напрямую там, где это возможно."
+                if cfg["_economy_mode"] else ""
+            )
+        )
 
     elif cmd == "/clear":
-        messages = messages[:1]  # оставляем только системный промпт
-        display.new_screen()
-        display.header(f"Termux AI Agent · провайдер: {cfg['active_provider']}")
-        display.info("История диалога очищена. Готов к новой задаче.")
+        messages = messages[:1]
+        meta["cleared"] = True
+        text = "История диалога очищена."
 
     else:
-        display.tool_warning(f"Неизвестная команда: {command}. Введи /help для списка команд.")
+        text = f"Неизвестная команда: {command}. Введи /help для списка команд."
+
+    return messages, text, meta
+
+
+def handle_slash_command(command: str, cfg: dict, messages: list):
+    """
+    Терминальная обёртка над execute_slash_command — сохраняет прежний
+    красивый вывод (рамки show_help, спрос y/n через display.confirm_action)
+    для CLI-режима, при этом вся логика единая с Telegram-версией.
+    """
+    messages, text, meta = execute_slash_command(command, cfg, messages)
+
+    if meta.get("show_help"):
+        display.show_help(tools.TOOL_SCHEMAS, cfg)
+        return messages
+
+    if meta.get("needs_confirmation"):
+        if display.confirm_action(meta["needs_confirmation"]):
+            _, path, run_args = meta["confirmed_action"]
+            display.tool_call("run_python", f"path={path!r}")
+            result = tools.run_python(path, run_args)
+            display.tool_result_preview(result)
+        return messages
+
+    if meta.get("cleared"):
+        display.new_screen()
+        display.header(f"Termux AI Agent · провайдер: {cfg['active_provider']}")
+
+    if text:
+        display.info(text)
 
     return messages
 
@@ -246,6 +318,7 @@ def main():
     if args.provider:
         cfg["active_provider"] = args.provider
     cfg.setdefault("_verbose", True)
+    cfg.setdefault("_economy_mode", False)
 
     display.new_screen()
     display.header(f"Termux AI Agent · провайдер: {cfg['active_provider']}")
