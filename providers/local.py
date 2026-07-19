@@ -15,17 +15,18 @@ import urllib.request
 import urllib.error
 
 
-def chat(messages, tools, cfg):
+def chat(messages, tools, cfg, tool_choice="auto", timeout=180):
     url = cfg["server_url"]
     model = cfg.get("model", "qwen2.5:3b")
 
     body = {
         "model": model,
         "messages": messages,
-        "tools": tools,
-        "tool_choice": "auto",
         "temperature": 0.3,
     }
+    if tool_choice != "none":
+        body["tools"] = tools
+        body["tool_choice"] = tool_choice
 
     data = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(
@@ -36,7 +37,7 @@ def chat(messages, tools, cfg):
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=180) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8")
             return json.loads(raw)
     except urllib.error.URLError as e:

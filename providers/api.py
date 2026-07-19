@@ -26,9 +26,12 @@ def _extract_retry_seconds(err_body: str, default=15) -> float:
     return default
 
 
-def chat(messages, tools, cfg):
+def chat(messages, tools, cfg, tool_choice="auto", timeout=90):
     """
     cfg — словарь cfg["api"] из config.json
+    tool_choice: "auto" (обычный режим) или "none" (запретить вызов инструментов —
+    нужно для inline mode в Telegram, где ответ должен прийти за пару секунд,
+    а вызов инструмента может занять намного больше).
     Возвращает сырой JSON-ответ модели (dict).
     """
     url = cfg["base_url"]
@@ -38,10 +41,11 @@ def chat(messages, tools, cfg):
     body = {
         "model": model,
         "messages": messages,
-        "tools": tools,
-        "tool_choice": "auto",
         "temperature": 0.3,
     }
+    if tool_choice != "none":
+        body["tools"] = tools
+        body["tool_choice"] = tool_choice
 
     data = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(
@@ -58,7 +62,7 @@ def chat(messages, tools, cfg):
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=90) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8")
             return json.loads(raw)
     except urllib.error.HTTPError as e:
